@@ -6,11 +6,14 @@ Compatibility wrappers remain for direct Python callers and legacy tests.
 """
 
 import json
+import logging
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Import from cron module (will be available when properly installed)
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -68,11 +71,17 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
     origin_platform = get_session_env("HERMES_SESSION_PLATFORM")
     origin_chat_id = get_session_env("HERMES_SESSION_CHAT_ID")
     if origin_platform and origin_chat_id:
+        thread_id = get_session_env("HERMES_SESSION_THREAD_ID") or None
+        if thread_id:
+            logger.debug(
+                "Cron origin captured thread_id=%s for %s:%s",
+                thread_id, origin_platform, origin_chat_id,
+            )
         return {
             "platform": origin_platform,
             "chat_id": origin_chat_id,
             "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None,
-            "thread_id": get_session_env("HERMES_SESSION_THREAD_ID") or None,
+            "thread_id": thread_id,
         }
     return None
 
