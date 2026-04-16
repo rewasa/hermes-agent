@@ -291,8 +291,24 @@ def _build_child_agent(
         parent_toolsets = set(DEFAULT_TOOLSETS)
 
     if toolsets:
-        # Intersect with parent — subagent must not gain tools the parent lacks
-        child_toolsets = _strip_blocked_tools([t for t in toolsets if t in parent_toolsets])
+        # Intersect with parent — subagent must not gain tools the parent lacks.
+        # A requested toolset is allowed when its name is in parent_toolsets
+        # OR when all of its resolved tools are already available to the parent
+        # (e.g. parent uses "hermes-cli" which includes "code_intel" tools).
+        from toolsets import resolve_toolset
+        _allowed = []
+        for t in toolsets:
+            if t in parent_toolsets:
+                _allowed.append(t)
+            else:
+                # Check if parent has all tools from this toolset
+                try:
+                    _resolved = set(resolve_toolset(t))
+                    if _resolved and _resolved <= parent_agent.valid_tool_names:
+                        _allowed.append(t)
+                except Exception:
+                    pass
+        child_toolsets = _strip_blocked_tools(_allowed)
     elif parent_agent and parent_enabled is not None:
         child_toolsets = _strip_blocked_tools(parent_enabled)
     elif parent_toolsets:
