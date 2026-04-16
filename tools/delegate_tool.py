@@ -92,6 +92,7 @@ def _build_child_system_prompt(
     context: Optional[str] = None,
     *,
     workspace_path: Optional[str] = None,
+    child_toolsets: Optional[List[str]] = None,
 ) -> str:
     """Build a focused system prompt for a child agent."""
     parts = [
@@ -106,6 +107,15 @@ def _build_child_system_prompt(
             "\nWORKSPACE PATH:\n"
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
+        )
+    # Steer toward AST-aware code intelligence tools when available.
+    if child_toolsets and "code_intel" in child_toolsets:
+        parts.append(
+            "\nCode intelligence tools are available in your toolset. "
+            "When working with source code, prefer these over generic tools:\n"
+            "- code_symbols (instead of read_file) for navigating file structure, listing functions/classes\n"
+            "- code_search (instead of search_files) for finding code patterns by AST structure\n"
+            "- code_refactor (instead of patch) for structural search-and-replace with dry_run preview"
         )
     parts.append(
         "\nComplete this task using the tools available to you. "
@@ -291,7 +301,7 @@ def _build_child_agent(
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
-    child_prompt = _build_child_system_prompt(goal, context, workspace_path=workspace_hint)
+    child_prompt = _build_child_system_prompt(goal, context, workspace_path=workspace_hint, child_toolsets=child_toolsets)
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):

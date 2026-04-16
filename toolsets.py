@@ -151,6 +151,12 @@ TOOLSETS = {
         "tools": ["read_file", "write_file", "patch", "search_files"],
         "includes": []
     },
+
+    "code_intel": {
+        "description": "AST-aware code intelligence: symbol extraction, structural search, and safe refactoring (tree-sitter + ast-grep)",
+        "tools": ["code_symbols", "code_search", "code_refactor"],
+        "includes": []
+    },
     
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, or OpenAI",
