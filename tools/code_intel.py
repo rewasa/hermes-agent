@@ -977,46 +977,42 @@ def code_search_tool(
     1. Raw tree-sitter query (via 'query' param)
     2. Named preset like 'function_calls', 'imports', 'try_catch', etc.
     3. Simple text pattern filter on captured nodes (via 'pattern' param)
+
+    Accepts both files and directories (recursive scan of supported files).
     """
     target = Path(path).expanduser().resolve()
 
     if not target.exists():
         return json.dumps({"error": f"Path not found: {path}"})
 
-    if not target.is_file():
-        return json.dumps({"error": "code_search only supports single files (not directories)"})
+    if target.is_file():
+        return _code_search_single_file(target, query, preset, pattern, language, max_results)
 
+    # Directory: scan all supported files recursively
+    return _code_search_directory(target, query, preset, pattern, language, max_results)
+
+
+def _code_search_single_file(
+    target: Path,
+    query: Optional[str] = None,
+    preset: Optional[str] = None,
+    pattern: Optional[str] = None,
+    language: Optional[str] = None,
+    max_results: int = 50,
+) -> str:
+    """Run code_search on a single file."""
     lang_key = detect_language(str(target), language)
     if lang_key is None:
         return json.dumps({
             "error": (
-                f"Unsupported language for '{path}'. "
+                f"Unsupported language for '{target}'. "
                 f"Supported: {', '.join(sorted(set(_EXT_TO_LANG.values())))}"
             ),
         })
 
-    # Determine the query string
-    query_str = None
-    if query:
-        query_str = query
-    elif preset:
-        query_str = _resolve_preset(preset, lang_key)
-        if query_str is None:
-            available = sorted(_CODE_SEARCH_PRESETS.keys()) + sorted(_PRESET_ALIASES.keys())
-            return json.dumps({
-                "error": f"Unknown preset '{preset}' for {lang_key}. "
-                         f"Available: {', '.join(available)}",
-            })
-    elif pattern:
-        # Fallback: use a broad query that captures all named nodes,
-        # then filter by text pattern
-        query_str = "(_) @node"
-    else:
-        return json.dumps({
-            "error": "Provide 'query', 'preset', or 'pattern'. "
-                     "Presets: function_calls, string_literals, imports, "
-                     "decorator_calls, try_catch, return_stmts, assignments.",
-        })
+    query_str = _resolve_query(query, preset, pattern, lang_key, str(target))
+    if isinstance(query_str, str) and query_str.startswith("{"):
+        return query_str  # error JSON
 
     parser = _get_parser(lang_key)
     lang = _get_language(lang_key)
@@ -1024,7 +1020,6 @@ def code_search_tool(
         return json.dumps({"error": f"No tree-sitter grammar for {lang_key}"})
 
     source = target.read_bytes()
-    source_lines = source.split(b"\n")
     tree = parser.parse(source)
 
     try:
@@ -1035,7 +1030,7 @@ def code_search_tool(
 
     qc = QueryCursor(ts_query)
     results = []
-    seen_spans = set()  # deduplicate overlapping captures
+    seen_spans = set()
 
     for _pat_idx, captures_dict in qc.matches(tree.root_node):
         for cap_name, nodes in captures_dict.items():
@@ -1044,18 +1039,15 @@ def code_search_tool(
                 end_row, end_col = node.end_point
                 span = (row, col, end_row, end_col)
 
-                # Deduplicate: skip if this exact span was already captured
                 if span in seen_spans:
                     continue
                 seen_spans.add(span)
 
                 text = node.text.decode("utf-8", errors="replace")
 
-                # Apply text pattern filter if provided
                 if pattern and pattern.lower() not in text.lower():
                     continue
 
-                # Truncate long captures
                 display = text if len(text) <= 200 else text[:197] + "..."
 
                 results.append({
@@ -1078,11 +1070,144 @@ def code_search_tool(
     return json.dumps({
         "path": str(target),
         "language": lang_key,
-        "query": query_str[:200],  # don't echo huge queries
+        "query": query_str[:200],
         "match_count": len(results),
         "truncated": truncated,
         "results": results,
     })
+
+
+def _code_search_directory(
+    target: Path,
+    query: Optional[str] = None,
+    preset: Optional[str] = None,
+    pattern: Optional[str] = None,
+    language: Optional[str] = None,
+    max_results: int = 50,
+) -> str:
+    """Run code_search across all supported files in a directory."""
+    results = []
+    files_scanned = 0
+    files_with_matches = 0
+    remaining = max_results
+
+    for ext in _EXT_TO_LANG:
+        for file_path in sorted(target.rglob(f"*{ext}")):
+            if not file_path.is_file():
+                continue
+            file_lang = detect_language(str(file_path), language)
+            if file_lang is None:
+                continue
+
+            # Resolve query for this file's language
+            query_str = _resolve_query(query, preset, pattern, file_lang, str(file_path))
+            if isinstance(query_str, str) and query_str.startswith("{"):
+                continue  # skip files with unsupported language/preset
+
+            parser = _get_parser(file_lang)
+            lang = _get_language(file_lang)
+            if parser is None or lang is None:
+                continue
+
+            try:
+                source = file_path.read_bytes()
+            except (OSError, PermissionError):
+                continue
+
+            files_scanned += 1
+            tree = parser.parse(source)
+
+            try:
+                from tree_sitter import Query, QueryCursor
+                ts_query = Query(lang, query_str)
+            except Exception:
+                continue
+
+            qc = QueryCursor(ts_query)
+            seen_spans = set()
+            file_results = []
+
+            for _pat_idx, captures_dict in qc.matches(tree.root_node):
+                for cap_name, nodes in captures_dict.items():
+                    for node in nodes:
+                        row, col = node.start_point
+                        end_row, end_col = node.end_point
+                        span = (row, col, end_row, end_col)
+
+                        if span in seen_spans:
+                            continue
+                        seen_spans.add(span)
+
+                        text = node.text.decode("utf-8", errors="replace")
+
+                        if pattern and pattern.lower() not in text.lower():
+                            continue
+
+                        display = text if len(text) <= 200 else text[:197] + "..."
+
+                        file_results.append({
+                            "file": str(file_path),
+                            "capture": cap_name,
+                            "text": display,
+                            "line": row + 1,
+                            "end_line": end_row + 1,
+                            "column": col,
+                            "kind": node.type,
+                        })
+
+                        remaining -= 1
+                        if remaining <= 0:
+                            break
+                    if remaining <= 0:
+                        break
+                if remaining <= 0:
+                    break
+
+            if file_results:
+                files_with_matches += 1
+                results.extend(file_results)
+
+            if remaining <= 0:
+                break
+
+    truncated = remaining <= 0 and results
+    return json.dumps({
+        "path": str(target),
+        "files_scanned": files_scanned,
+        "files_with_matches": files_with_matches,
+        "match_count": len(results),
+        "truncated": truncated,
+        "results": results,
+    })
+
+
+def _resolve_query(
+    query: Optional[str],
+    preset: Optional[str],
+    pattern: Optional[str],
+    lang_key: str,
+    file_path: str,
+) -> str:
+    """Resolve query string from query/preset/pattern. Returns JSON error string on failure."""
+    if query:
+        return query
+    elif preset:
+        query_str = _resolve_preset(preset, lang_key)
+        if query_str is None:
+            available = sorted(_CODE_SEARCH_PRESETS.keys()) + sorted(_PRESET_ALIASES.keys())
+            return json.dumps({
+                "error": f"Unknown preset '{preset}' for {lang_key} ({file_path}). "
+                         f"Available: {', '.join(available)}",
+            })
+        return query_str
+    elif pattern:
+        return "(_) @node"
+    else:
+        return json.dumps({
+            "error": "Provide 'query', 'preset', or 'pattern'. "
+                     "Presets: function_calls, string_literals, imports, "
+                     "decorator_calls, try_catch, return_stmts, assignments.",
+        })
 
 
 CODE_SEARCH_SCHEMA = {
@@ -1092,13 +1217,14 @@ CODE_SEARCH_SCHEMA = {
         "try/catch blocks, return statements, assignments by their semantic structure, "
         "not just text. Use this INSTEAD of search_files (grep) when searching for code "
         "patterns inside source files — it understands syntax and won't match comments "
-        "or strings by accident. Use named presets: function_calls, imports, "
-        "decorator_calls, try_catch, return_stmts, string_literals, assignments."
+        "or strings by accident. Accepts files and directories (recursive scan). "
+        "Use named presets: function_calls, imports, decorator_calls, try_catch, "
+        "return_stmts, string_literals, assignments."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "File path to search (single file only)"},
+            "path": {"type": "string", "description": "File or directory path to search"},
             "query": {"type": "string", "description": "Raw tree-sitter query string (e.g. '(call function: (identifier) @func) @call')"},
             "preset": {"type": "string", "description": "Named preset: function_calls, string_literals, imports, decorator_calls, try_catch, return_stmts, assignments"},
             "pattern": {"type": "string", "description": "Simple text pattern to filter captured nodes (substring match)"},

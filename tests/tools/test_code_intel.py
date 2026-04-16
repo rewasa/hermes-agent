@@ -498,9 +498,11 @@ class TestCodeSearch:
         result = json.loads(code_search_tool(str(tmp_path / "missing.py")))
         assert "error" in result
 
-    def test_search_directory_rejected(self, tmp_path):
-        result = json.loads(code_search_tool(str(tmp_path)))
-        assert "error" in result
+    def test_search_directory_scans_recursively(self, tmp_path):
+        # Directory with no supported files → 0 matches, not an error
+        result = json.loads(code_search_tool(str(tmp_path), preset="function_calls"))
+        assert result["files_scanned"] == 0
+        assert result["match_count"] == 0
 
     def test_search_max_results(self, tmp_path):
         # Create a file with many function calls
@@ -513,6 +515,47 @@ class TestCodeSearch:
         ))
         assert result["match_count"] == 5
         assert result["truncated"] is True
+
+    def test_search_directory_multi_file(self, tmp_path):
+        """code_search on directory scans multiple files and aggregates results."""
+        (tmp_path / "a.py").write_text("foo()\nbar()")
+        (tmp_path / "b.py").write_text("baz()\n# just a comment\nqux()")
+        (tmp_path / "readme.txt").write_text("not code")
+
+        result = json.loads(code_search_tool(
+            str(tmp_path), preset="function_calls",
+        ))
+        assert result["files_scanned"] == 2
+        assert result["files_with_matches"] == 2
+        # Preset captures both @call and @func per call, so 4 calls × 2 captures = 8
+        assert result["match_count"] == 8
+        # All results should have file path
+        for r in result["results"]:
+            assert "file" in r
+
+    def test_search_directory_with_pattern_filter(self, tmp_path):
+        """Directory scan respects pattern filter across files."""
+        (tmp_path / "a.py").write_text("print('hello')\nrange(10)")
+        (tmp_path / "b.py").write_text("len([1])\nprint('ok')")
+
+        result = json.loads(code_search_tool(
+            str(tmp_path), preset="function_calls", pattern="print",
+        ))
+        # 2 print() calls, each has @func + @call captures = 4 total
+        assert result["match_count"] == 4
+        func_captures = [r for r in result["results"] if r["capture"] == "func"]
+        assert len(func_captures) == 2
+        assert all("print" in r["text"] for r in func_captures)
+
+    def test_search_directory_max_results_across_files(self, tmp_path):
+        """max_results limit works across files in directory scan."""
+        (tmp_path / "a.py").write_text("\n".join([f"f{i}()" for i in range(50)]))
+        (tmp_path / "b.py").write_text("\n".join([f"g{i}()" for i in range(50)]))
+
+        result = json.loads(code_search_tool(
+            str(tmp_path), preset="function_calls", max_results=3,
+        ))
+        assert result["match_count"] == 3
 
     def test_search_unknown_preset(self, tmp_py):
         result = json.loads(code_search_tool(str(tmp_py), preset="nonexistent"))
