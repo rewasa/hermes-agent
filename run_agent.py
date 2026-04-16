@@ -1440,6 +1440,7 @@ class AIAgent:
         self._subdirectory_hints = SubdirectoryHintTracker(
             working_dir=os.getenv("TERMINAL_CWD") or None,
         )
+        self._code_intel_steering = None  # Lazy-init in _init_code_intel_steering()
         self._user_turn_count = 0
 
         # Cumulative token usage for the session
@@ -7028,6 +7029,30 @@ class AIAgent:
         body = ("\n" + indent).join(out_lines)
         return f"{indent}{label}{body}"
 
+    def _check_code_intel_steering(self, tool_name: str, tool_args: dict) -> Optional[str]:
+        """Check if a tool call should trigger a code_intel steering hint.
+
+        Lazy-initializes the CodeIntelSteering tracker on first call.
+        Returns hint string to append to tool result, or None.
+        """
+        if self._code_intel_steering is None:
+            try:
+                from agent.code_intel_steering import CodeIntelSteering
+                self._code_intel_steering = CodeIntelSteering()
+            except Exception:
+                logger.debug("code_intel_steering not available, skipping")
+                self._code_intel_steering = False  # Don't retry
+                return None
+        if self._code_intel_steering is False:
+            return None
+        try:
+            return self._code_intel_steering.check_tool_call(
+                tool_name, tool_args,
+                available_tools=self.valid_tool_names,
+            )
+        except Exception:
+            return None
+
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute multiple tool calls concurrently using a thread pool.
 
@@ -7220,6 +7245,11 @@ class AIAgent:
             subdir_hints = self._subdirectory_hints.check_tool_call(name, args)
             if subdir_hints:
                 function_result += subdir_hints
+
+            # Steer toward code_intel tools when using generic file tools on source code
+            intel_hint = self._check_code_intel_steering(name, args)
+            if intel_hint:
+                function_result += intel_hint
 
             tool_msg = {
                 "role": "tool",
@@ -7566,6 +7596,11 @@ class AIAgent:
             subdir_hints = self._subdirectory_hints.check_tool_call(function_name, function_args)
             if subdir_hints:
                 function_result += subdir_hints
+
+            # Steer toward code_intel tools when using generic file tools on source code
+            intel_hint = self._check_code_intel_steering(function_name, function_args)
+            if intel_hint:
+                function_result += intel_hint
 
             tool_msg = {
                 "role": "tool",
