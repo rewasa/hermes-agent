@@ -302,9 +302,10 @@ def get_tool_definitions(
                     }
                     break
 
-    # Append code-intel cross-references when those tools are available.
-    # Steers the model toward AST-aware tools for code navigation tasks
-    # instead of defaulting to grep/read_file/patch for everything.
+    # Prepend code-intel cross-references when those tools are available.
+    # PREPEND (not append) — first sentences in a tool description carry the
+    # most weight with LLMs.  Use "Do NOT" framing to match the pattern that
+    # successfully drives search_files/read_file usage.
     code_intel_tools = {"code_symbols", "code_search", "code_refactor"} & available_tool_names
     if code_intel_tools:
         for i, td in enumerate(filtered_tools):
@@ -313,30 +314,33 @@ def get_tool_definitions(
 
             if fn_name == "search_files" and "code_search" in code_intel_tools:
                 hint = (
-                    "\n\nFor AST-aware structural search inside source files "
-                    "(find function calls, imports, decorators, etc.), prefer code_search — "
-                    "it understands syntax and won't match comments or strings."
+                    "DO NOT use search_files for structural source-code search "
+                    "(function calls, imports, decorators, class members) — "
+                    "use code_search instead (AST-aware, understands syntax, "
+                    "won't match comments or strings). "
                 )
-                if hint[1:-1] not in desc:  # avoid double-appending
-                    desc += hint
+                if hint not in desc:
+                    desc = hint + desc
 
             elif fn_name == "read_file" and "code_symbols" in code_intel_tools:
                 hint = (
-                    "\n\nFor understanding what a file contains (list of functions, classes, "
-                    "methods with line numbers and signatures), prefer code_symbols — "
-                    "much more token-efficient than reading the entire file."
+                    "DO NOT use read_file just to understand what a source file contains "
+                    "(list functions, classes, methods) — "
+                    "use code_symbols instead (returns signatures with line numbers, "
+                    "far fewer tokens than reading the whole file). "
                 )
-                if hint[1:-1] not in desc:
-                    desc += hint
+                if hint not in desc:
+                    desc = hint + desc
 
             elif fn_name == "patch" and "code_refactor" in code_intel_tools:
                 hint = (
-                    "\n\nFor AST-aware structural replacement (rename patterns, wrap "
-                    "functions, add parameters across a file), prefer code_refactor — "
-                    "matches by syntax tree, not raw text. Dry-run by default."
+                    "DO NOT use patch for structural refactoring "
+                    "(rename patterns, wrap functions, add parameters) — "
+                    "use code_refactor instead (matches by AST, not raw text; "
+                    "dry-run by default). "
                 )
-                if hint[1:-1] not in desc:
-                    desc += hint
+                if hint not in desc:
+                    desc = hint + desc
 
             if desc != td["function"].get("description", ""):
                 filtered_tools[i] = {

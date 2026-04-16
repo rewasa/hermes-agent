@@ -170,6 +170,21 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+CODE_INTEL_GUIDANCE = (
+    "# Code intelligence (AST-aware tools)\n"
+    "When working with source code, prefer AST-aware tools over generic text tools:\n"
+    "- DO NOT use search_files to find function calls, imports, decorators, or class members — "
+    "use code_search instead (understands syntax, won't match comments or strings).\n"
+    "- DO NOT use read_file just to understand what a source file contains (list functions, "
+    "classes, methods) — use code_symbols instead (returns signatures with line numbers, "
+    "far fewer tokens than reading the whole file).\n"
+    "- DO NOT use patch for structural refactoring (rename patterns, wrap functions, add "
+    "parameters across a codebase) — use code_refactor instead (matches by AST structure, "
+    "not raw text; dry-run by default).\n"
+    "These tools use tree-sitter for accurate parsing. Prefer them for any task involving "
+    "code structure — navigating, searching, or modifying source files."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "
