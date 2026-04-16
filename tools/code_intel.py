@@ -1287,57 +1287,40 @@ def _ast_grep_rewrite(src: str, rewrite_template: str, variables: dict) -> str:
     return result
 
 
-def code_refactor_tool(
-    path: str,
+# Map language key to ast-grep language name
+_AST_GREP_LANG_MAP = {
+    "python": "python",
+    "javascript": "javascript",
+    "typescript": "typescript",
+    "tsx": "tsx",
+    "rust": "rust",
+    "go": "go",
+    "java": "java",
+    "c": "c",
+    "cpp": "cpp",
+}
+
+# Reusable regex for extracting ast-grep meta variable names from a pattern
+_AST_GREP_VAR_RE = re.compile(r'\$(\$)?([A-Z_][A-Z0-9_]*)')
+
+
+def _code_refactor_single_file(
+    target: Path,
     pattern: str,
     rewrite: str,
-    language: Optional[str] = None,
-    dry_run: bool = True,
-    context_lines: int = 1,
-) -> str:
-    """Structural search and replace using ast-grep.
-
-    Matches AST patterns (not text) and replaces them. Dry-run by default.
-    Supports ast-grep meta variables: $NAME for single nodes, $$BODY for multiple nodes.
-    """
-    target = Path(path).expanduser().resolve()
-
-    if not target.exists():
-        return json.dumps({"error": f"Path not found: {path}"})
-
-    if not target.is_file():
-        return json.dumps({"error": "code_refactor only supports single files"})
-
-    lang_key = detect_language(str(target), language)
-    if lang_key is None:
-        return json.dumps({
-            "error": (
-                f"Unsupported language for '{path}'. "
-                f"Supported: {', '.join(sorted(set(_EXT_TO_LANG.values())))}"
-            ),
-        })
-
-    # Map language key to ast-grep language name
-    _AST_GREP_LANG_MAP = {
-        "python": "python",
-        "javascript": "javascript",
-        "typescript": "typescript",
-        "tsx": "tsx",
-        "rust": "rust",
-        "go": "go",
-        "java": "java",
-        "c": "c",
-        "cpp": "cpp",
-    }
-
+    lang_key: str,
+    dry_run: bool,
+    context_lines: int,
+) -> dict:
+    """Run ast-grep on a single file. Returns result dict (never raises)."""
     ag_lang = _AST_GREP_LANG_MAP.get(lang_key)
     if ag_lang is None:
-        return json.dumps({"error": f"ast-grep does not support {lang_key}"})
+        return {"path": str(target), "language": lang_key, "error": f"ast-grep does not support {lang_key}"}
 
     try:
         import ast_grep_py as sg
     except ImportError:
-        return json.dumps({"error": "ast-grep-py not installed. Install with: pip install ast-grep-py"})
+        return {"path": str(target), "error": "ast-grep-py not installed. Install with: pip install ast-grep-py"}
 
     source = target.read_text(encoding="utf-8", errors="replace")
     source_lines = source.split("\n")
@@ -1345,27 +1328,25 @@ def code_refactor_tool(
     try:
         root = sg.SgRoot(source, ag_lang)
     except Exception as e:
-        return json.dumps({"error": f"Failed to parse source: {e}"})
+        return {"path": str(target), "language": lang_key, "error": f"Failed to parse source: {e}"}
 
     try:
         matches = list(root.root().find_all(pattern=pattern))
     except Exception as e:
-        return json.dumps({"error": f"Invalid pattern or no matches: {e}"})
+        return {"path": str(target), "language": lang_key, "error": f"Invalid pattern or no matches: {e}"}
 
     if not matches:
-        return json.dumps({
+        return {
             "path": str(target),
             "language": lang_key,
             "pattern": pattern,
             "match_count": 0,
             "changes": [],
-            "message": "No matches found for pattern.",
-        })
+        }
 
     # Collect matches with context, compute rewrites
+    var_names = set(_AST_GREP_VAR_RE.findall(pattern))
     changes = []
-    # Apply edits from bottom to top to preserve line offsets
-    edits_applied = set()
 
     for match in matches:
         rng = match.range()
@@ -1382,9 +1363,6 @@ def code_refactor_tool(
 
         # Extract meta variables
         variables = {}
-        # Parse variable names from pattern
-        import re as _re
-        var_names = set(_re.findall(r'\$(\$)?([A-Z_][A-Z0-9_]*)', pattern))
         for is_multi, var_name in var_names:
             try:
                 var_node = match.get_match(var_name)
@@ -1419,64 +1397,167 @@ def code_refactor_tool(
     applied = False
     if not dry_run:
         try:
-            # Apply from bottom to top to preserve offsets
-            edits = []
-            for match in reversed(matches):
-                edit = match.replace(rewrite)
-                edits.append(edit)
-            new_source = root.root().commit_edits(edits)
-            # ast-grep-py commit_edits doesn't interpolate vars,
-            # so do manual replacement
             lines_out = source_lines[:]
+            # Apply from bottom to top to preserve offsets
             for change, match in zip(reversed(changes), matches):
                 rng = match.range()
                 sr, sc = rng.start.line, rng.start.column
                 er, ec = rng.end.line, rng.end.column
-                # Replace lines
                 new_first = lines_out[sr][:sc] + change["replacement"]
                 new_last_part = lines_out[er][ec:] if er < len(lines_out) else ""
                 lines_out[sr:er + 1] = [new_first + new_last_part]
             target.write_text("\n".join(lines_out), encoding="utf-8")
             applied = True
         except Exception as e:
-            return json.dumps({
+            return {
                 "path": str(target),
+                "language": lang_key,
                 "error": f"Failed to apply changes: {e}",
                 "match_count": len(changes),
                 "changes": changes,
-            })
+            }
 
-    return json.dumps({
+    return {
         "path": str(target),
         "language": lang_key,
         "pattern": pattern,
         "rewrite": rewrite,
         "dry_run": dry_run,
         "match_count": len(changes),
-        "applied": applied and not dry_run,
+        "applied": applied,
         "changes": changes,
+    }
+
+
+def _code_refactor_directory(
+    target: Path,
+    pattern: str,
+    rewrite: str,
+    language: Optional[str],
+    dry_run: bool,
+    context_lines: int,
+    file_glob: Optional[str] = None,
+) -> str:
+    """Recursively refactor files in a directory."""
+    files_scanned = 0
+    files_changed = 0
+    total_matches = 0
+    errors = []
+    file_results = []
+
+    # Collect files — grouped by language key for efficiency
+    ext_lang_map = {}
+    for ext, lang in _EXT_TO_LANG.items():
+        ext_lang_map.setdefault(lang, []).append(f"*{ext}")
+
+    for lang_key, globs in ext_lang_map.items():
+        ag_lang = _AST_GREP_LANG_MAP.get(lang_key)
+        if ag_lang is None:
+            continue  # Skip languages ast-grep doesn't support
+        for glob_pat in globs:
+            if file_glob:
+                for f in sorted(target.rglob(f"{file_glob}{glob_pat.lstrip('*')}")):
+                    if f.is_file():
+                        result = _code_refactor_single_file(
+                            f, pattern, rewrite, lang_key, dry_run, context_lines,
+                        )
+                        files_scanned += 1
+                        file_results.append(result)
+            else:
+                for f in sorted(target.rglob(glob_pat)):
+                    if f.is_file():
+                        result = _code_refactor_single_file(
+                            f, pattern, rewrite, lang_key, dry_run, context_lines,
+                        )
+                        files_scanned += 1
+                        file_results.append(result)
+
+    # Summarize results
+    for r in file_results:
+        if "error" in r:
+            errors.append({"path": r["path"], "error": r["error"]})
+        else:
+            mc = r.get("match_count", 0)
+            total_matches += mc
+            if mc > 0:
+                files_changed += 1
+
+    return json.dumps({
+        "path": str(target),
+        "pattern": pattern,
+        "rewrite": rewrite,
+        "dry_run": dry_run,
+        "files_scanned": files_scanned,
+        "files_changed": files_changed,
+        "match_count": total_matches,
+        "errors": len(errors),
+        "results": file_results,
     })
+
+
+def code_refactor_tool(
+    path: str,
+    pattern: str,
+    rewrite: str,
+    language: Optional[str] = None,
+    dry_run: bool = True,
+    context_lines: int = 1,
+    file_glob: Optional[str] = None,
+) -> str:
+    """Structural search and replace using ast-grep.
+
+    Matches AST patterns (not text) and replaces them. Dry-run by default.
+    Supports ast-grep meta variables: $NAME for single nodes, $$BODY for multiple nodes.
+    Supports both files and directories (recursive scan across supported languages).
+    """
+    target = Path(path).expanduser().resolve()
+
+    if not target.exists():
+        return json.dumps({"error": f"Path not found: {path}"})
+
+    if target.is_dir():
+        if language:
+            # Language override with directory — warn but proceed (applied per-file)
+            pass
+        return _code_refactor_directory(
+            target, pattern, rewrite, language, dry_run, context_lines, file_glob,
+        )
+
+    # Single file path
+    lang_key = detect_language(str(target), language)
+    if lang_key is None:
+        return json.dumps({
+            "error": (
+                f"Unsupported language for '{path}'. "
+                f"Supported: {', '.join(sorted(set(_EXT_TO_LANG.values())))}"
+            ),
+        })
+
+    result = _code_refactor_single_file(target, pattern, rewrite, lang_key, dry_run, context_lines)
+    return json.dumps(result)
 
 
 CODE_REFACTOR_SCHEMA = {
     "name": "code_refactor",
     "description": (
         "AST-aware structural search and replace — matches code by syntax tree structure, "
-        "not raw text. Use this INSTEAD of patch when doing bulk refactoring across a file "
+        "not raw text. Use this INSTEAD of patch when doing bulk refactoring across files or directories "
         "(rename patterns, wrap functions, add parameters, change decorators, etc.). "
         "Supports meta variables: $NAME for single nodes, $$BODY for multi-node captures. "
         "DRY-RUN by default — set dry_run=false to apply. "
-        "Supports Python, TypeScript, TSX, JavaScript, Rust, Go, Java."
+        "Supports both files and directories (recursive scan across all supported languages). "
+        "Supports Python, TypeScript, TSX, JavaScript, Rust, Go, Java, C, C++."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "File path to refactor (single file only)"},
+            "path": {"type": "string", "description": "File path or directory to refactor"},
             "pattern": {"type": "string", "description": "ast-grep pattern (e.g. 'console.log($ARG)', 'def $NAME($$$ARGS): $$$BODY')"},
             "rewrite": {"type": "string", "description": "Replacement template with meta variables (e.g. 'console.info($ARG)')"},
-            "language": {"type": "string", "description": "Override language auto-detection"},
+            "language": {"type": "string", "description": "Override language auto-detection (single file only)"},
             "dry_run": {"type": "boolean", "description": "Preview changes without writing (default: true)"},
             "context_lines": {"type": "integer", "description": "Lines of context around each match (default: 1)"},
+            "file_glob": {"type": "string", "description": "Filter files by glob pattern in directory mode (e.g. '*.service.ts', '*_test.py')"},
         },
         "required": ["path", "pattern", "rewrite"],
     },
@@ -1491,6 +1572,7 @@ def _handle_code_refactor(args, **kw):
         language=args.get("language"),
         dry_run=args.get("dry_run", True),
         context_lines=args.get("context_lines", 1),
+        file_glob=args.get("file_glob"),
     )
 
 

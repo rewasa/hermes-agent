@@ -676,6 +676,87 @@ class TestCodeRefactor:
         assert "# before" in ctx["before"]
         assert "# after" in ctx["after"]
 
+    # --- Multi-file (directory) tests ---
+
+    def test_directory_dry_run(self, tmp_path):
+        """code_refactor on a directory finds matches across multiple files."""
+        (tmp_path / "a.ts").write_text('console.log("a")\nlet x = 1')
+        (tmp_path / "b.ts").write_text('console.log("b")\nlet y = 2')
+        (tmp_path / "c.py").write_text('print("c")')  # No match
+        result = json.loads(code_refactor_tool(
+            str(tmp_path), pattern='console.log($ARG)', rewrite='console.info($ARG)',
+        ))
+        assert result["files_scanned"] == 3
+        assert result["files_changed"] == 2
+        assert result["match_count"] == 2
+        assert result["dry_run"] is True
+        # Files should NOT be modified
+        assert 'console.log("a")' in (tmp_path / "a.ts").read_text()
+
+    def test_directory_wet_run(self, tmp_path):
+        """code_refactor dry_run=false applies changes to all matching files."""
+        (tmp_path / "a.ts").write_text('console.log("a")\n')
+        (tmp_path / "b.ts").write_text('console.log("b")\n')
+        result = json.loads(code_refactor_tool(
+            str(tmp_path), pattern='console.log($ARG)', rewrite='console.info($ARG)',
+            dry_run=False,
+        ))
+        assert result["files_changed"] == 2
+        assert result["match_count"] == 2
+        assert 'console.info("a")' in (tmp_path / "a.ts").read_text()
+        assert 'console.info("b")' in (tmp_path / "b.ts").read_text()
+        assert "console.log" not in (tmp_path / "a.ts").read_text()
+
+    def test_directory_with_file_glob(self, tmp_path):
+        """file_glob filters which files are scanned in directory mode."""
+        (tmp_path / "service.ts").write_text('console.log("keep")\n')
+        (tmp_path / "test.ts").write_text('console.log("skip")\n')
+        (tmp_path / "other.py").write_text('console.log("py")\n')
+        result = json.loads(code_refactor_tool(
+            str(tmp_path), pattern='console.log($ARG)', rewrite='console.info($ARG)',
+            file_glob="*test",
+        ))
+        # Should only scan files matching *test pattern
+        assert result["files_scanned"] == 1  # only test.ts
+        assert result["match_count"] == 1
+
+    def test_directory_no_matches(self, tmp_path):
+        """Directory with no matching patterns returns zeros."""
+        (tmp_path / "a.py").write_text('x = 1\n')
+        (tmp_path / "b.py").write_text('y = 2\n')
+        result = json.loads(code_refactor_tool(
+            str(tmp_path), pattern='console.log($ARG)', rewrite='console.info($ARG)',
+        ))
+        assert result["files_scanned"] == 2
+        assert result["files_changed"] == 0
+        assert result["match_count"] == 0
+
+    def test_directory_single_file_still_works(self, tmp_path):
+        """Backward compat: single file path still returns flat structure."""
+        f = tmp_path / "test.ts"
+        f.write_text('console.log("hello")\n')
+        result = json.loads(code_refactor_tool(
+            str(f), pattern='console.log($ARG)', rewrite='console.info($ARG)',
+            language="typescript",
+        ))
+        assert result["match_count"] == 1
+        assert "path" in result
+        assert "changes" in result
+        # Single file should NOT have "results" key (flat, not wrapped)
+        assert "results" not in result
+
+    def test_directory_mixed_languages(self, tmp_path):
+        """Refactoring across mixed language files works."""
+        (tmp_path / "app.ts").write_text('console.log("ts")\n')
+        (tmp_path / "main.py").write_text('def foo():\n    pass\n')
+        # Only TS files should match
+        result = json.loads(code_refactor_tool(
+            str(tmp_path), pattern='console.log($ARG)', rewrite='console.info($ARG)',
+        ))
+        assert result["files_scanned"] == 2
+        assert result["files_changed"] == 1
+        assert result["match_count"] == 1
+
 
 # ---------------------------------------------------------------------------
 # Registry integration for new tools
