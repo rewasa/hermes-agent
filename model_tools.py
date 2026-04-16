@@ -302,6 +302,48 @@ def get_tool_definitions(
                     }
                     break
 
+    # Append code-intel cross-references when those tools are available.
+    # Steers the model toward AST-aware tools for code navigation tasks
+    # instead of defaulting to grep/read_file/patch for everything.
+    code_intel_tools = {"code_symbols", "code_search", "code_refactor"} & available_tool_names
+    if code_intel_tools:
+        for i, td in enumerate(filtered_tools):
+            fn_name = td.get("function", {}).get("name", "")
+            desc = td["function"].get("description", "")
+
+            if fn_name == "search_files" and "code_search" in code_intel_tools:
+                hint = (
+                    "\n\nFor AST-aware structural search inside source files "
+                    "(find function calls, imports, decorators, etc.), prefer code_search — "
+                    "it understands syntax and won't match comments or strings."
+                )
+                if hint[1:-1] not in desc:  # avoid double-appending
+                    desc += hint
+
+            elif fn_name == "read_file" and "code_symbols" in code_intel_tools:
+                hint = (
+                    "\n\nFor understanding what a file contains (list of functions, classes, "
+                    "methods with line numbers and signatures), prefer code_symbols — "
+                    "much more token-efficient than reading the entire file."
+                )
+                if hint[1:-1] not in desc:
+                    desc += hint
+
+            elif fn_name == "patch" and "code_refactor" in code_intel_tools:
+                hint = (
+                    "\n\nFor AST-aware structural replacement (rename patterns, wrap "
+                    "functions, add parameters across a file), prefer code_refactor — "
+                    "matches by syntax tree, not raw text. Dry-run by default."
+                )
+                if hint[1:-1] not in desc:
+                    desc += hint
+
+            if desc != td["function"].get("description", ""):
+                filtered_tools[i] = {
+                    "type": "function",
+                    "function": {**td["function"], "description": desc},
+                }
+
     if not quiet_mode:
         if filtered_tools:
             tool_names = [t["function"]["name"] for t in filtered_tools]

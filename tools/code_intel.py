@@ -825,11 +825,12 @@ def code_symbols_tool(
 CODE_SYMBOLS_SCHEMA = {
     "name": "code_symbols",
     "description": (
-        "Extract symbols (functions, classes, methods, interfaces, types, enums) "
-        "from source files using AST parsing. Token-efficient alternative to "
-        "reading entire files. Supports Python, TypeScript, JavaScript, Rust, Go, "
-        "and Java. Pass a directory to scan all files. Use 'pattern' for fuzzy name filter, "
-        "'kind' to filter by symbol type."
+        "AST-powered symbol extraction — get a structured index of functions, classes, "
+        "methods, interfaces, types, enums, structs, traits from any source file. "
+        "Use this INSTEAD of read_file when you need to understand what a file contains "
+        "(what functions exist, what classes define which methods, where things are). "
+        "Returns line numbers, signatures, and symbol kinds. Pass a directory to index "
+        "all files at once. Supports Python, TypeScript, TSX, JavaScript, Rust, Go, Java."
     ),
     "parameters": {
         "type": "object",
@@ -1089,11 +1090,12 @@ def code_search_tool(
 CODE_SEARCH_SCHEMA = {
     "name": "code_search",
     "description": (
-        "AST-aware structural code search using tree-sitter. Find function calls, imports, "
-        "string literals, try/catch blocks, return statements, assignments, and more. "
-        "Use 'preset' for named queries (function_calls, string_literals, imports, "
-        "decorator_calls, try_catch, return_stmts, assignments) or 'query' for raw "
-        "tree-sitter query syntax. Use 'pattern' for simple text filter on all nodes."
+        "AST-aware structural code search — find function calls, imports, decorators, "
+        "try/catch blocks, return statements, assignments by their semantic structure, "
+        "not just text. Use this INSTEAD of search_files (grep) when searching for code "
+        "patterns inside source files — it understands syntax and won't match comments "
+        "or strings by accident. Use named presets: function_calls, imports, "
+        "decorator_calls, try_catch, return_stmts, string_literals, assignments."
     ),
     "parameters": {
         "type": "object",
@@ -1335,10 +1337,11 @@ def code_refactor_tool(
 CODE_REFACTOR_SCHEMA = {
     "name": "code_refactor",
     "description": (
-        "AST-aware structural search and replace using ast-grep. Matches code by structure, "
-        "not text. Supports meta variables: $NAME for single nodes, $$BODY for multi-node. "
-        "DRY-RUN by default — set dry_run=false to apply changes. "
-        "Use for safe, large-scale refactoring (rename patterns, wrap functions, add parameters, etc.). "
+        "AST-aware structural search and replace — matches code by syntax tree structure, "
+        "not raw text. Use this INSTEAD of patch when doing bulk refactoring across a file "
+        "(rename patterns, wrap functions, add parameters, change decorators, etc.). "
+        "Supports meta variables: $NAME for single nodes, $$BODY for multi-node captures. "
+        "DRY-RUN by default — set dry_run=false to apply. "
         "Supports Python, TypeScript, TSX, JavaScript, Rust, Go, Java."
     ),
     "parameters": {
