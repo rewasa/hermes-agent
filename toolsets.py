@@ -56,8 +56,8 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
-    # Code intelligence — AST-aware symbol extraction and structural search
-    "code_symbols",
+    # Code intelligence — AST-aware symbol extraction, search, and refactoring
+    "code_symbols", "code_search", "code_refactor",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)

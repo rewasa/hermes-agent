@@ -883,3 +883,495 @@ registry.register(
     check_fn=_check_code_intel_reqs,
     emoji="🔍",
 )
+
+
+# ---------------------------------------------------------------------------
+# code_search — AST-aware structural search via tree-sitter Query
+# ---------------------------------------------------------------------------
+
+# Preset queries for common patterns (user can also pass raw queries)
+_CODE_SEARCH_PRESETS = {
+    "function_calls": {
+        "python": "(call function: (identifier) @func) @call",
+        "typescript": "(call_expression function: (identifier) @func) @call",
+        "javascript": "(call_expression function: (identifier) @func) @call",
+        "rust": "(call_expression function: (identifier) @func) @call",
+        "go": "(call_expression function: (identifier) @func) @call",
+        "java": "(method_invocation name: (identifier) @func) @call",
+    },
+    "string_literals": {
+        "python": '(string) @str',
+        "typescript": '(string) @str',
+        "javascript": '(string) @str',
+        "rust": '(string_literal) @str',
+        "go": '(interpreted_string_literal) @str',
+        "java": '(string_literal) @str',
+    },
+    "imports": {
+        "python": "(import_statement) @import\n(import_from_statement) @import",
+        "typescript": "(import_statement) @import",
+        "javascript": "(import_statement) @import",
+        "rust": "(use_declaration) @import",
+        "go": "(import_declaration) @import",
+        "java": "(import_declaration) @import",
+    },
+    "decorator_calls": {
+        "python": "(decorator) @deco",
+        "typescript": "(decorator) @deco",
+        "javascript": "(decorator) @deco",
+    },
+    "try_catch": {
+        "python": "(try_statement) @tc",
+        "typescript": "(try_statement) @tc",
+        "javascript": "(try_statement) @tc",
+        "java": "(try_statement) @tc",
+    },
+    "return_stmts": {
+        "python": "(return_statement) @ret",
+        "typescript": "(return_statement) @ret",
+        "javascript": "(return_statement) @ret",
+        "rust": "(return_expression) @ret",
+        "go": "(return_statement) @ret",
+        "java": "(return_statement) @ret",
+    },
+    "assignments": {
+        "python": "(assignment left: (_) @lhs right: (_) @rhs) @assign",
+        "typescript": "(assignment_expression left: (_) @lhs right: (_) @rhs) @assign",
+        "javascript": "(assignment_expression left: (_) @lhs right: (_) @rhs) @assign",
+        "go": "(short_var_declaration left: (_) @lhs right: (_) @rhs) @assign",
+    },
+}
+
+# Alias presets to common names
+_PRESET_ALIASES = {
+    "calls": "function_calls",
+    "strings": "string_literals",
+    "imports": "imports",
+    "decorators": "decorator_calls",
+    "try": "try_catch",
+    "catch": "try_catch",
+    "returns": "return_stmts",
+    "assigns": "assignments",
+}
+
+
+def _resolve_preset(preset: str, lang_key: str) -> Optional[str]:
+    """Resolve a preset name to a tree-sitter query string."""
+    canonical = _PRESET_ALIASES.get(preset, preset)
+    lang_queries = _CODE_SEARCH_PRESETS.get(canonical)
+    if lang_queries is None:
+        return None
+    return lang_queries.get(lang_key)
+
+
+def code_search_tool(
+    path: str,
+    query: Optional[str] = None,
+    preset: Optional[str] = None,
+    pattern: Optional[str] = None,
+    language: Optional[str] = None,
+    max_results: int = 50,
+) -> str:
+    """AST-aware structural code search using tree-sitter Query API.
+
+    Supports three modes:
+    1. Raw tree-sitter query (via 'query' param)
+    2. Named preset like 'function_calls', 'imports', 'try_catch', etc.
+    3. Simple text pattern filter on captured nodes (via 'pattern' param)
+    """
+    target = Path(path).expanduser().resolve()
+
+    if not target.exists():
+        return json.dumps({"error": f"Path not found: {path}"})
+
+    if not target.is_file():
+        return json.dumps({"error": "code_search only supports single files (not directories)"})
+
+    lang_key = detect_language(str(target), language)
+    if lang_key is None:
+        return json.dumps({
+            "error": (
+                f"Unsupported language for '{path}'. "
+                f"Supported: {', '.join(sorted(set(_EXT_TO_LANG.values())))}"
+            ),
+        })
+
+    # Determine the query string
+    query_str = None
+    if query:
+        query_str = query
+    elif preset:
+        query_str = _resolve_preset(preset, lang_key)
+        if query_str is None:
+            available = sorted(_CODE_SEARCH_PRESETS.keys()) + sorted(_PRESET_ALIASES.keys())
+            return json.dumps({
+                "error": f"Unknown preset '{preset}' for {lang_key}. "
+                         f"Available: {', '.join(available)}",
+            })
+    elif pattern:
+        # Fallback: use a broad query that captures all named nodes,
+        # then filter by text pattern
+        query_str = "(_) @node"
+    else:
+        return json.dumps({
+            "error": "Provide 'query', 'preset', or 'pattern'. "
+                     "Presets: function_calls, string_literals, imports, "
+                     "decorator_calls, try_catch, return_stmts, assignments.",
+        })
+
+    parser = _get_parser(lang_key)
+    lang = _get_language(lang_key)
+    if parser is None or lang is None:
+        return json.dumps({"error": f"No tree-sitter grammar for {lang_key}"})
+
+    source = target.read_bytes()
+    source_lines = source.split(b"\n")
+    tree = parser.parse(source)
+
+    try:
+        from tree_sitter import Query, QueryCursor
+        ts_query = Query(lang, query_str)
+    except Exception as e:
+        return json.dumps({"error": f"Invalid tree-sitter query: {e}"})
+
+    qc = QueryCursor(ts_query)
+    results = []
+    seen_spans = set()  # deduplicate overlapping captures
+
+    for _pat_idx, captures_dict in qc.matches(tree.root_node):
+        for cap_name, nodes in captures_dict.items():
+            for node in nodes:
+                row, col = node.start_point
+                end_row, end_col = node.end_point
+                span = (row, col, end_row, end_col)
+
+                # Deduplicate: skip if this exact span was already captured
+                if span in seen_spans:
+                    continue
+                seen_spans.add(span)
+
+                text = node.text.decode("utf-8", errors="replace")
+
+                # Apply text pattern filter if provided
+                if pattern and pattern.lower() not in text.lower():
+                    continue
+
+                # Truncate long captures
+                display = text if len(text) <= 200 else text[:197] + "..."
+
+                results.append({
+                    "capture": cap_name,
+                    "text": display,
+                    "line": row + 1,
+                    "end_line": end_row + 1,
+                    "column": col,
+                    "kind": node.type,
+                })
+
+                if len(results) >= max_results:
+                    break
+            if len(results) >= max_results:
+                break
+        if len(results) >= max_results:
+            break
+
+    truncated = len(results) >= max_results
+    return json.dumps({
+        "path": str(target),
+        "language": lang_key,
+        "query": query_str[:200],  # don't echo huge queries
+        "match_count": len(results),
+        "truncated": truncated,
+        "results": results,
+    })
+
+
+CODE_SEARCH_SCHEMA = {
+    "name": "code_search",
+    "description": (
+        "AST-aware structural code search using tree-sitter. Find function calls, imports, "
+        "string literals, try/catch blocks, return statements, assignments, and more. "
+        "Use 'preset' for named queries (function_calls, string_literals, imports, "
+        "decorator_calls, try_catch, return_stmts, assignments) or 'query' for raw "
+        "tree-sitter query syntax. Use 'pattern' for simple text filter on all nodes."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "File path to search (single file only)"},
+            "query": {"type": "string", "description": "Raw tree-sitter query string (e.g. '(call function: (identifier) @func) @call')"},
+            "preset": {"type": "string", "description": "Named preset: function_calls, string_literals, imports, decorator_calls, try_catch, return_stmts, assignments"},
+            "pattern": {"type": "string", "description": "Simple text pattern to filter captured nodes (substring match)"},
+            "language": {"type": "string", "description": "Override language auto-detection"},
+            "max_results": {"type": "integer", "description": "Maximum number of results (default: 50)"},
+        },
+        "required": ["path"],
+    },
+}
+
+
+def _handle_code_search(args, **kw):
+    return code_search_tool(
+        path=args.get("path", ""),
+        query=args.get("query"),
+        preset=args.get("preset"),
+        pattern=args.get("pattern"),
+        language=args.get("language"),
+        max_results=args.get("max_results", 50),
+    )
+
+
+registry.register(
+    name="code_search",
+    toolset="code_intel",
+    schema=CODE_SEARCH_SCHEMA,
+    handler=_handle_code_search,
+    check_fn=_check_code_intel_reqs,
+    emoji="🔎",
+)
+
+
+# ---------------------------------------------------------------------------
+# code_refactor — ast-grep structural search & replace (dry-run default)
+# ---------------------------------------------------------------------------
+
+def _check_ast_grep_reqs() -> bool:
+    """Check if ast-grep-py is installed."""
+    try:
+        import ast_grep_py  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _ast_grep_rewrite(src: str, rewrite_template: str, variables: dict) -> str:
+    """Interpolate ast-grep meta variables into a rewrite template.
+
+    ast-grep-py's commit_edits doesn't interpolate $VAR in replacement text,
+    so we do it manually.
+    """
+    result = rewrite_template
+    # Sort by key length descending to avoid partial replacements
+    for var_name in sorted(variables, key=len, reverse=True):
+        # $NAME and $$NAME are both used by ast-grep
+        for prefix in ("$$", "$"):
+            placeholder = f"{prefix}{var_name}"
+            if placeholder in result:
+                result = result.replace(placeholder, variables[var_name])
+    return result
+
+
+def code_refactor_tool(
+    path: str,
+    pattern: str,
+    rewrite: str,
+    language: Optional[str] = None,
+    dry_run: bool = True,
+    context_lines: int = 1,
+) -> str:
+    """Structural search and replace using ast-grep.
+
+    Matches AST patterns (not text) and replaces them. Dry-run by default.
+    Supports ast-grep meta variables: $NAME for single nodes, $$BODY for multiple nodes.
+    """
+    target = Path(path).expanduser().resolve()
+
+    if not target.exists():
+        return json.dumps({"error": f"Path not found: {path}"})
+
+    if not target.is_file():
+        return json.dumps({"error": "code_refactor only supports single files"})
+
+    lang_key = detect_language(str(target), language)
+    if lang_key is None:
+        return json.dumps({
+            "error": (
+                f"Unsupported language for '{path}'. "
+                f"Supported: {', '.join(sorted(set(_EXT_TO_LANG.values())))}"
+            ),
+        })
+
+    # Map language key to ast-grep language name
+    _AST_GREP_LANG_MAP = {
+        "python": "python",
+        "javascript": "javascript",
+        "typescript": "typescript",
+        "tsx": "tsx",
+        "rust": "rust",
+        "go": "go",
+        "java": "java",
+        "c": "c",
+        "cpp": "cpp",
+    }
+
+    ag_lang = _AST_GREP_LANG_MAP.get(lang_key)
+    if ag_lang is None:
+        return json.dumps({"error": f"ast-grep does not support {lang_key}"})
+
+    try:
+        import ast_grep_py as sg
+    except ImportError:
+        return json.dumps({"error": "ast-grep-py not installed. Install with: pip install ast-grep-py"})
+
+    source = target.read_text(encoding="utf-8", errors="replace")
+    source_lines = source.split("\n")
+
+    try:
+        root = sg.SgRoot(source, ag_lang)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to parse source: {e}"})
+
+    try:
+        matches = list(root.root().find_all(pattern=pattern))
+    except Exception as e:
+        return json.dumps({"error": f"Invalid pattern or no matches: {e}"})
+
+    if not matches:
+        return json.dumps({
+            "path": str(target),
+            "language": lang_key,
+            "pattern": pattern,
+            "match_count": 0,
+            "changes": [],
+            "message": "No matches found for pattern.",
+        })
+
+    # Collect matches with context, compute rewrites
+    changes = []
+    # Apply edits from bottom to top to preserve line offsets
+    edits_applied = set()
+
+    for match in matches:
+        rng = match.range()
+        start_row = rng.start.line
+        start_col = rng.start.column
+        end_row = rng.end.line
+        end_col = rng.end.column
+
+        original = source_lines[start_row][start_col:]
+        if end_row > start_row:
+            original += "\n" + "\n".join(source_lines[start_row + 1 : end_row])
+        if end_row < len(source_lines):
+            original += source_lines[end_row][:end_col]
+
+        # Extract meta variables
+        variables = {}
+        # Parse variable names from pattern
+        import re as _re
+        var_names = set(_re.findall(r'\$(\$)?([A-Z_][A-Z0-9_]*)', pattern))
+        for is_multi, var_name in var_names:
+            try:
+                var_node = match.get_match(var_name)
+                if var_node is not None:
+                    variables[var_name] = var_node.text()
+            except Exception:
+                pass
+
+        # Compute replacement text
+        replacement = _ast_grep_rewrite("", rewrite, variables)
+
+        # Context lines
+        ctx_start = max(0, start_row - context_lines)
+        ctx_end = min(len(source_lines) - 1, end_row + context_lines)
+
+        change = {
+            "line": start_row + 1,
+            "end_line": end_row + 1,
+            "original": original[:300],
+            "replacement": replacement[:300],
+            "variables": variables,
+            "context": {
+                "start": ctx_start + 1,
+                "end": ctx_end + 1,
+                "before": "\n".join(source_lines[ctx_start:start_row]) if start_row > 0 else "",
+                "after": "\n".join(source_lines[end_row + 1 : ctx_end + 1]) if end_row < ctx_end else "",
+            },
+        }
+        changes.append(change)
+
+    # Apply changes if not dry-run
+    applied = False
+    if not dry_run:
+        try:
+            # Apply from bottom to top to preserve offsets
+            edits = []
+            for match in reversed(matches):
+                edit = match.replace(rewrite)
+                edits.append(edit)
+            new_source = root.root().commit_edits(edits)
+            # ast-grep-py commit_edits doesn't interpolate vars,
+            # so do manual replacement
+            lines_out = source_lines[:]
+            for change, match in zip(reversed(changes), matches):
+                rng = match.range()
+                sr, sc = rng.start.line, rng.start.column
+                er, ec = rng.end.line, rng.end.column
+                # Replace lines
+                new_first = lines_out[sr][:sc] + change["replacement"]
+                new_last_part = lines_out[er][ec:] if er < len(lines_out) else ""
+                lines_out[sr:er + 1] = [new_first + new_last_part]
+            target.write_text("\n".join(lines_out), encoding="utf-8")
+            applied = True
+        except Exception as e:
+            return json.dumps({
+                "path": str(target),
+                "error": f"Failed to apply changes: {e}",
+                "match_count": len(changes),
+                "changes": changes,
+            })
+
+    return json.dumps({
+        "path": str(target),
+        "language": lang_key,
+        "pattern": pattern,
+        "rewrite": rewrite,
+        "dry_run": dry_run,
+        "match_count": len(changes),
+        "applied": applied and not dry_run,
+        "changes": changes,
+    })
+
+
+CODE_REFACTOR_SCHEMA = {
+    "name": "code_refactor",
+    "description": (
+        "AST-aware structural search and replace using ast-grep. Matches code by structure, "
+        "not text. Supports meta variables: $NAME for single nodes, $$BODY for multi-node. "
+        "DRY-RUN by default — set dry_run=false to apply changes. "
+        "Use for safe, large-scale refactoring (rename patterns, wrap functions, add parameters, etc.). "
+        "Supports Python, TypeScript, TSX, JavaScript, Rust, Go, Java."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "File path to refactor (single file only)"},
+            "pattern": {"type": "string", "description": "ast-grep pattern (e.g. 'console.log($ARG)', 'def $NAME($$$ARGS): $$$BODY')"},
+            "rewrite": {"type": "string", "description": "Replacement template with meta variables (e.g. 'console.info($ARG)')"},
+            "language": {"type": "string", "description": "Override language auto-detection"},
+            "dry_run": {"type": "boolean", "description": "Preview changes without writing (default: true)"},
+            "context_lines": {"type": "integer", "description": "Lines of context around each match (default: 1)"},
+        },
+        "required": ["path", "pattern", "rewrite"],
+    },
+}
+
+
+def _handle_code_refactor(args, **kw):
+    return code_refactor_tool(
+        path=args.get("path", ""),
+        pattern=args.get("pattern", ""),
+        rewrite=args.get("rewrite", ""),
+        language=args.get("language"),
+        dry_run=args.get("dry_run", True),
+        context_lines=args.get("context_lines", 1),
+    )
+
+
+registry.register(
+    name="code_refactor",
+    toolset="code_intel",
+    schema=CODE_REFACTOR_SCHEMA,
+    handler=_handle_code_refactor,
+    check_fn=_check_ast_grep_reqs,
+    emoji="🔧",
+)
