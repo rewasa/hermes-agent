@@ -62,7 +62,8 @@ _AST_GRASP_LANGS = {
 
 _SYMBOL_QUERIES = {
     "python": """
-        ; Functions (sync and async)
+        ; Functions (sync and async) — catches top-level AND bare methods
+        ; (method detection happens in extract_symbols via parent chain)
         (function_definition
             name: (identifier) @name
         ) @def
@@ -72,22 +73,12 @@ _SYMBOL_QUERIES = {
             name: (identifier) @name
         ) @def
 
-        ; Class methods
-        (class_definition
-            body: (block
-                (function_definition
-                    "async"? @keyword
-                    name: (identifier) @name
-                ) @def
-            )
-        )
-
         ; Module-level assignments that look like constants (UPPER_CASE)
         (assignment
             left: (identifier) @name
         ) @constant
 
-        ; Decorated functions/classes
+        ; Decorated functions/classes (including decorated methods inside classes)
         (decorated_definition
             definition: (function_definition
                 "async"? @keyword
@@ -162,14 +153,10 @@ _SYMBOL_QUERIES = {
             ) @def
         )
 
-        ; Class methods
-        (class_declaration
-            body: (class_body
-                (method_definition
-                    name: (property_identifier) @name
-                ) @def
-            )
-        )
+        ; Class methods (including decorated — decorator is a sibling, not parent)
+        (method_definition
+            name: (property_identifier) @name
+        ) @def
     """,
     "tsx": """
         ; Same as typescript plus component detection
@@ -224,13 +211,10 @@ _SYMBOL_QUERIES = {
             ) @def
         )
 
-        (class_declaration
-            body: (class_body
-                (method_definition
-                    name: (property_identifier) @name
-                ) @def
-            )
-        )
+        ; Class methods (including decorated)
+        (method_definition
+            name: (property_identifier) @name
+        ) @def
     """,
     "javascript": """
         ; Functions (sync and async — async is a keyword child, handled automatically)
@@ -259,14 +243,10 @@ _SYMBOL_QUERIES = {
             name: (identifier) @name
         ) @def
 
-        ; Class methods
-        (class_declaration
-            body: (class_body
-                (method_definition
-                    name: (property_identifier) @name
-                ) @def
-            )
-        )
+        ; Class methods (including decorated)
+        (method_definition
+            name: (property_identifier) @name
+        ) @def
 
         ; Export statements
         (export_statement
@@ -618,6 +598,14 @@ def extract_symbols(
         # Determine symbol kind from node type
         kind = _NODE_KIND_MAP.get(def_node.type, "symbol")
 
+        # For decorated_definition: look at the inner definition's type
+        if def_node.type == "decorated_definition" and kind == "symbol":
+            for child in def_node.children:
+                inner_kind = _NODE_KIND_MAP.get(child.type)
+                if inner_kind:
+                    kind = inner_kind
+                    break
+
         # For Go type_spec: detect struct/interface/trait by looking at the type child
         if def_node.type == "type_spec" and kind == "symbol":
             for child in def_node.children:
@@ -627,19 +615,29 @@ def extract_symbols(
                     break
 
         # Detect methods (function inside class/impl/struct body)
-        parent_of_def = def_node.parent
-        if parent_of_def:
-            gp = parent_of_def.parent
-            if parent_of_def.type == "block" and gp and gp.type == "class_definition":
+        # Walk up through wrappers like decorated_definition
+        _cur = def_node.parent
+        _depth = 0
+        while _cur and _depth < 4:
+            _par = _cur.parent
+            if _cur.type == "block" and _par and _par.type == "class_definition":
                 if kind == "function":
                     kind = "method"
-            elif parent_of_def.type in ("class_body", "declaration_list"):
-                if gp and gp.type in (
+                break
+            elif _cur.type in ("class_body", "declaration_list"):
+                if _par and _par.type in (
                     "class_declaration", "class_definition",
                     "impl_item", "struct_item",
                 ):
                     if kind == "function":
                         kind = "method"
+                break
+            elif _cur.type in ("decorated_definition", "abstract_method_declaration"):
+                # Skip wrapper — keep walking up
+                _cur = _par
+                _depth += 1
+                continue
+            break
 
         # Apply kind filter
         if kind_filter and kind_filter != "all":
