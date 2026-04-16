@@ -1,6 +1,6 @@
 ---
 name: comfyui
-description: Control a running ComfyUI instance from Hermes — queue workflows, generate images/video, upload inputs, manage models. Use when the user wants to create or modify anything with ComfyUI's node-based generative pipeline.
+description: Control ComfyUI via REST API — queue workflows, generate images/video, manage models.
 version: 1.0.0
 requires: ComfyUI running locally or remotely (default http://127.0.0.1:8188)
 author: kshitijk4poor
@@ -53,7 +53,7 @@ You should see system info with OS, Python version, VRAM, etc.
 Use this helper inside `execute_code` for all ComfyUI interactions:
 
 ```python
-import json, time, urllib.request, urllib.error, uuid, os
+import json, time, urllib.request, urllib.error, urllib.parse, uuid, os
 
 COMFY_URL = os.getenv("COMFYUI_URL", "http://127.0.0.1:8188")
 
@@ -105,19 +105,19 @@ def upload_image(filepath, img_type="input", overwrite=True):
     with open(filepath, "rb") as f:
         file_data = f.read()
 
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="image"; filename="{filename}"\r\n'
-        f"Content-Type: {mime}\r\n\r\n"
-    ).encode() + file_data + (
-        f"\r\n--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="type"\r\n\r\n'
-        f"{img_type}\r\n"
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="overwrite"\r\n\r\n'
-        f"{'true' if overwrite else 'false'}\r\n"
-        f"--{boundary}--\r\n"
-    ).encode()
+    parts = []
+    parts.append(f"--{boundary}\r\n"
+                 f'Content-Disposition: form-data; name="image"; filename="{filename}"\r\n'
+                 f"Content-Type: {mime}\r\n\r\n".encode())
+    parts.append(file_data)
+    parts.append(f"\r\n--{boundary}\r\n"
+                 f'Content-Disposition: form-data; name="type"\r\n\r\n'
+                 f"{img_type}\r\n"
+                 f"--{boundary}\r\n"
+                 f'Content-Disposition: form-data; name="overwrite"\r\n\r\n'
+                 f"{'true' if overwrite else 'false'}\r\n"
+                 f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
 
     req = urllib.request.Request(
         f"{COMFY_URL}/upload/image", data=body, method="POST",
@@ -283,29 +283,10 @@ Recommended MCP servers:
 
 ## Pitfalls
 
-1. **API format vs UI format**: ComfyUI Save produces UI format (with layout info).
-   Only API format works with POST /prompt. Use "Save (API Format)" or extract
-   the `"prompt"` key from the UI format JSON.
+See `references/pitfalls.md` for 10 common pitfalls with solutions. Key ones:
 
-2. **Node IDs are strings**: Always use `"3"` not `3` in workflow dicts. Links
-   between nodes use `["source_node_id", output_index]` arrays.
-
-3. **Model names must be exact**: Use `list_models("checkpoints")` to get the
-   exact filename including extension (e.g., `"v1-5-pruned-emaonly.safetensors"`).
-
-4. **Long generations**: Complex workflows (high steps, large images, video) can
-   take minutes. Set `wait_for_completion(timeout=600)` for heavy workloads.
-
-5. **VRAM exhaustion**: Large models + high resolution can OOM. Use
-   `comfy_api("POST", "/free", {"unload_models": True})` to free VRAM between
-   generations, or add `--lowvram` / `--cpu` flags when starting ComfyUI.
-
-6. **Custom nodes**: Many workflows require custom nodes (ControlNet, IPAdapter,
-   AnimateDiff, etc.). If a workflow fails with "class_type not found", the user
-   needs to install the missing node pack via ComfyUI Manager or manually.
-
-7. **Output path**: Generated images are saved in ComfyUI's `output/` directory.
-   Use `get_image()` to download them to a local path the user can access.
-
-8. **Concurrent generations**: ComfyUI queues prompts sequentially by default.
-   Multiple `queue_prompt()` calls will queue, not parallelize.
+- **API vs UI format** — only API format works with POST /prompt
+- **Node IDs are strings** — `"3"` not `3`
+- **Model names must be exact** — use `list_models()` first
+- **VRAM exhaustion** — use `--lowvram` or free models between generations
+- **Custom node not found** — install missing pack via ComfyUI Manager

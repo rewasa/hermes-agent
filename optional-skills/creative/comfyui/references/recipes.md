@@ -305,8 +305,6 @@ Strength 0.5-0.9 typical. Higher = stricter adherence to control image.
 All recipes follow the same execution pattern:
 
 ```python
-import urllib.parse
-
 pid = queue_prompt(workflow)
 print(f"Queued: {pid}")
 
