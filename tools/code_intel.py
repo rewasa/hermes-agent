@@ -15,6 +15,7 @@ import re
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +28,16 @@ _LANG_LOCK = threading.Lock()
 _LANG_CACHE: Dict[str, object] = {}  # ext → Language
 _PARSER_CACHE: Dict[str, object] = {}  # lang_key → Parser
 _LANG_READY = False
-_SYMBOL_CACHE = {}
+_SYMBOL_CACHE = OrderedDict()
 
 
 # Extension → language key mapping
+
+def _set_cache(key, value):
+    _SYMBOL_CACHE[key] = value
+    if len(_SYMBOL_CACHE) > 2000:
+        _SYMBOL_CACHE.popitem(last=False)
+
 _EXT_TO_LANG = {
     ".py": "python",
     ".pyi": "python",
@@ -727,6 +734,13 @@ def code_symbols_tool(
     include_body: bool = False,
     language: Optional[str] = None,
 ) -> str:
+
+    try:
+        import tree_sitter
+    except ImportError:
+        return json.dumps({
+            "error": "Code intelligence dependencies are not installed. Please run: uv pip install 'hermes-agent[code-intel]'"
+        })
     """Extract symbols from source files using tree-sitter AST parsing."""
     target = Path(path).expanduser().resolve()
 
@@ -765,7 +779,7 @@ def code_symbols_tool(
                 kind_filter=kind,
                 include_body=include_body,
             )
-            _SYMBOL_CACHE[cache_key] = symbols
+            _set_cache(cache_key, symbols)
 
         return _format_symbols_output(str(target), symbols, total_lines, lang_key)
 
@@ -803,7 +817,7 @@ def code_symbols_tool(
                     kind_filter=kind,
                     include_body=False,
                 )
-                _SYMBOL_CACHE[cache_key] = syms
+                _set_cache(cache_key, syms)
             if syms:
                 results.append({
                     "path": str(file_path),
@@ -876,12 +890,8 @@ CODE_SYMBOLS_SCHEMA = {
 
 
 def _check_code_intel_reqs() -> bool:
-    """Check if code intelligence dependencies are installed."""
-    try:
-        import tree_sitter  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """Always return True so the tools are visible, but fail gracefully."""
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1008,13 @@ def code_search_tool(
     language: Optional[str] = None,
     max_results: int = 50,
 ) -> str:
+
+    try:
+        import tree_sitter
+    except ImportError:
+        return json.dumps({
+            "error": "Code intelligence dependencies are not installed. Please run: uv pip install 'hermes-agent[code-intel]'"
+        })
     """AST-aware structural code search using tree-sitter Query API.
 
     Supports three modes:
@@ -1289,12 +1306,8 @@ registry.register(
 # ---------------------------------------------------------------------------
 
 def _check_ast_grep_reqs() -> bool:
-    """Check if ast-grep-py is installed."""
-    try:
-        import ast_grep_py  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """Always return True so the tool is visible, but fail gracefully."""
+    return True
 
 
 def _ast_grep_rewrite(src: str, rewrite_template: str, variables: dict) -> str:
@@ -1347,7 +1360,7 @@ def _code_refactor_single_file(
     try:
         import ast_grep_py as sg
     except ImportError:
-        return {"path": str(target), "error": "ast-grep-py not installed. Install with: pip install ast-grep-py"}
+        return {"path": str(target), "error": "ast-grep-py not installed. Please run: uv pip install 'hermes-agent[code-intel]'"}
 
     source = target.read_text(encoding="utf-8", errors="replace")
     source_lines = source.split("\n")
