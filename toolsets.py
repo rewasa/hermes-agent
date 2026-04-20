@@ -234,7 +234,9 @@ TOOLSETS = {
     "hermes-acp": {
         "description": "Editor integration (VS Code, Zed, JetBrains) — coding-focused tools without messaging, audio, or clarify UI",
         "tools": [
-            "web_search", "web_extract",
+            "code_symbols", "code_search", "code_refactor",
+"code_symbols", "code_search", "code_refactor",
+"web_search", "web_extract",
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
@@ -255,7 +257,9 @@ TOOLSETS = {
     "hermes-api-server": {
         "description": "OpenAI-compatible API server — full agent tools accessible via HTTP (no interactive UI tools like clarify or send_message)",
         "tools": [
-            # Web
+            "code_symbols", "code_search", "code_refactor",
+"code_symbols", "code_search", "code_refactor",
+# Web
             "web_search", "web_extract",
             # Terminal + process management
             "terminal", "process",

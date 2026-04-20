@@ -27,6 +27,8 @@ _LANG_LOCK = threading.Lock()
 _LANG_CACHE: Dict[str, object] = {}  # ext → Language
 _PARSER_CACHE: Dict[str, object] = {}  # lang_key → Parser
 _LANG_READY = False
+_SYMBOL_CACHE = {}
+
 
 # Extension → language key mapping
 _EXT_TO_LANG = {
@@ -747,14 +749,24 @@ def code_symbols_tool(
             })
 
     if target.is_file():
-        source = target.read_bytes()
-        total_lines = source.count(b"\n") + 1
-        symbols = extract_symbols(
-            source, lang_key,
-            pattern_filter=pattern,
-            kind_filter=kind,
-            include_body=include_body,
-        )
+        mtime = target.stat().st_mtime
+        cache_key = (str(target), mtime, lang_key, pattern, kind, include_body)
+        
+        if cache_key in _SYMBOL_CACHE:
+            symbols = _SYMBOL_CACHE[cache_key]
+            # Fast-path total lines reading since we don't need the source
+            total_lines = target.read_bytes().count(b"\n") + 1
+        else:
+            source = target.read_bytes()
+            total_lines = source.count(b"\n") + 1
+            symbols = extract_symbols(
+                source, lang_key,
+                pattern_filter=pattern,
+                kind_filter=kind,
+                include_body=include_body,
+            )
+            _SYMBOL_CACHE[cache_key] = symbols
+
         return _format_symbols_output(str(target), symbols, total_lines, lang_key)
 
     # Directory: scan all supported files
@@ -764,19 +776,34 @@ def code_symbols_tool(
         for file_path in sorted(target.rglob(f"*{ext}")):
             if not file_path.is_file():
                 continue
-            try:
-                source = file_path.read_bytes()
-            except (OSError, PermissionError):
-                continue
             file_lang = detect_language(str(file_path), language)
             if file_lang is None:
                 continue
-            syms = extract_symbols(
-                source, file_lang,
-                pattern_filter=pattern,
-                kind_filter=kind,
-                include_body=False,  # Never include body for directory scans
-            )
+
+            try:
+                mtime = file_path.stat().st_mtime
+            except OSError:
+                continue
+                
+            cache_key = (str(file_path), mtime, file_lang, pattern, kind, False)
+            if cache_key in _SYMBOL_CACHE:
+                syms = _SYMBOL_CACHE[cache_key]
+                try:
+                    source = file_path.read_bytes()
+                except OSError:
+                    continue
+            else:
+                try:
+                    source = file_path.read_bytes()
+                except OSError:
+                    continue
+                syms = extract_symbols(
+                    source, file_lang,
+                    pattern_filter=pattern,
+                    kind_filter=kind,
+                    include_body=False,
+                )
+                _SYMBOL_CACHE[cache_key] = syms
             if syms:
                 results.append({
                     "path": str(file_path),
