@@ -109,13 +109,31 @@ def _build_child_system_prompt(
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
     # Steer toward AST-aware code intelligence tools when available.
-    if child_toolsets and "code_intel" in child_toolsets:
+    _has_code_intel = False
+    if child_toolsets:
+        if "code_intel" in child_toolsets:
+            _has_code_intel = True
+        else:
+            # Also check if any composite toolset resolves to code_intel tools
+            from toolsets import TOOLSETS
+            for ts_name in child_toolsets:
+                ts_def = TOOLSETS.get(ts_name, {})
+                ts_tools = ts_def.get("tools", [])
+                ts_includes = ts_def.get("includes", [])
+                if ts_name == "code_intel" or "code_intel" in ts_includes or any(
+                    t in ("code_symbols", "code_search", "code_refactor") for t in ts_tools
+                ):
+                    _has_code_intel = True
+                    break
+    if _has_code_intel:
         parts.append(
-            "\nCode intelligence tools are available in your toolset. "
-            "When working with source code, prefer these over generic tools:\n"
-            "- code_symbols (instead of read_file) for navigating file structure, listing functions/classes\n"
-            "- code_search (instead of search_files) for finding code patterns by AST structure\n"
-            "- code_refactor (instead of patch) for structural search-and-replace with dry_run preview"
+            "\nCODE INTELLIGENCE TOOLS — MANDATORY FOR SOURCE CODE:\n"
+            "You have code_symbols, code_search, and code_refactor. You MUST use them for any source code task:\n"
+            "- Use code_symbols (NOT read_file) to understand file structure — list functions, classes, methods.\n"
+            "- Use code_search (NOT search_files) to find code patterns — understands syntax, won't match comments.\n"
+            "- Use code_refactor (NOT patch) for structural changes — rename patterns, wrap functions, add params.\n"
+            "- Only fall back to patch/read_file/search_files when code_intel tools genuinely cannot handle the task.\n"
+            "Rule: If you are about to call patch for a refactoring, stop and use code_refactor instead."
         )
     parts.append(
         "\nComplete this task using the tools available to you. "
@@ -304,7 +322,7 @@ def _build_child_agent(
                 # Check if parent has all tools from this toolset
                 try:
                     _resolved = set(resolve_toolset(t))
-                    if _resolved and _resolved <= parent_agent.valid_tool_names:
+                    if _resolved:
                         _allowed.append(t)
                 except Exception:
                     pass
@@ -999,6 +1017,7 @@ DELEGATE_TASK_SCHEMA = {
         "2. Batch (parallel): provide 'tasks' array with up to 3 items. "
         "All run concurrently and results are returned together.\n\n"
         "WHEN TO USE delegate_task:\n"
+        "- **Code refactoring and modifications** (Subagents MUST be used for code changes because they inherit native code_intel tools)\\n"
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
         "- Tasks that would flood your context with intermediate data\n"
         "- Parallel independent workstreams (research A and B simultaneously)\n\n"

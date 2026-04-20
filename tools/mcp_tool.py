@@ -299,7 +299,7 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
         which_hit = shutil.which(resolved_command, path=path_arg)
         if which_hit:
             resolved_command = which_hit
-        elif resolved_command in {"npx", "npm", "node"}:
+        elif resolved_command in {"npx", "npm", "node", "uvx", "uv"}:
             hermes_home = os.path.expanduser(
                 os.getenv(
                     "HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes")
@@ -308,6 +308,7 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
             candidates = [
                 os.path.join(hermes_home, "node", "bin", resolved_command),
                 os.path.join(os.path.expanduser("~"), ".local", "bin", resolved_command),
+                os.path.join("/opt/homebrew", "bin", resolved_command),  # macOS Homebrew
             ]
             for candidate in candidates:
                 if os.path.isfile(candidate) and os.access(candidate, os.X_OK):

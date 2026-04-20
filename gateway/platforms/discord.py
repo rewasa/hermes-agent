@@ -1752,6 +1752,9 @@ class DiscordAdapter(BasePlatformAdapter):
         Each category becomes a subcommand group; root-level skills become
         direct subcommands.  Discord supports 25 subcommand groups × 25
         subcommands each = 625 skills — well beyond the old 100-command cap.
+
+        A global byte-budget guard ensures the total serialized payload stays
+        under Discord's 8000-byte application-command limit.
         """
         try:
             from hermes_cli.commands import discord_skill_commands_by_category
@@ -1775,23 +1778,26 @@ class DiscordAdapter(BasePlatformAdapter):
             )
 
             # ── Helper: build a callback for a skill command key ──
+            # NOTE: No ``args`` parameter — each one adds ~50 bytes to the
+            # serialized payload.  With 100+ skills this blows past Discord's
+            # 8000-byte total command limit.  Users pass arguments in a
+            # follow-up message after the slash command fires.
             def _make_handler(_key: str):
-                @discord.app_commands.describe(args="Optional arguments for the skill")
-                async def _handler(interaction: discord.Interaction, args: str = ""):
-                    await self._run_simple_slash(interaction, f"{_key} {args}".strip())
+                async def _handler(interaction: discord.Interaction):
+                    await self._run_simple_slash(interaction, _key)
                 _handler.__name__ = f"skill_{_key.lstrip('/').replace('-', '_')}"
                 return _handler
 
-            # ── Uncategorized (root-level) skills → direct subcommands ──
-            for discord_name, description, cmd_key in uncategorized:
-                cmd = discord.app_commands.Command(
-                    name=discord_name,
-                    description=description or f"Run the {discord_name} skill",
-                    callback=_make_handler(cmd_key),
-                )
-                skill_group.add_command(cmd)
+            # ── Collect all entries with their context ──
+            # (group_ref, discord_name, description, cmd_key)
+            _all_entries: list[tuple] = []
 
-            # ── Category subcommand groups ──
+            # Uncategorized (root-level) skills → direct subcommands
+            for discord_name, description, cmd_key in uncategorized:
+                _all_entries.append((skill_group, discord_name, description, cmd_key, None))
+
+            # Category subcommand groups
+            _cat_groups: dict[str, discord.app_commands.Group] = {}
             for cat_name in sorted(categories):
                 cat_desc = f"{cat_name.replace('-', ' ').title()} skills"
                 if len(cat_desc) > 100:
@@ -1801,21 +1807,63 @@ class DiscordAdapter(BasePlatformAdapter):
                     description=cat_desc,
                     parent=skill_group,
                 )
+                _cat_groups[cat_name] = cat_group
                 for discord_name, description, cmd_key in categories[cat_name]:
-                    cmd = discord.app_commands.Command(
-                        name=discord_name,
-                        description=description or f"Run the {discord_name} skill",
-                        callback=_make_handler(cmd_key),
-                    )
-                    cat_group.add_command(cmd)
+                    _all_entries.append((cat_group, discord_name, description, cmd_key, cat_name))
+
+            # ── Register all, then measure & trim via actual serialization ──
+            # Discord's application-command payload limit is 8000 bytes total.
+            # We register all commands first, serialize the group to JSON,
+            # then remove commands from the tail until it fits.
+            import json as _json
+
+            _DISCORD_BYTE_LIMIT = 8000
+            # Reserve room for other non-skill commands already in the tree
+            _other_bytes = 0
+            try:
+                _other_cmds = [c for c in tree.get_commands() if c.name != "skill"]
+                if _other_cmds:
+                    _other_bytes = len(_json.dumps(
+                        [getattr(c, "to_dict", lambda: {})() for c in _other_cmds]
+                    ))
+            except Exception:
+                pass
+            _BUDGET = _DISCORD_BYTE_LIMIT - _other_bytes - 500  # 500 B safety margin
+
+            # Register everything first
+            for group_ref, discord_name, description, cmd_key, _cat in _all_entries:
+                desc = description or f"Run {discord_name}"
+                if len(desc) > 60:
+                    desc = desc[:57] + "..."
+                cmd = discord.app_commands.Command(
+                    name=discord_name,
+                    description=desc,
+                    callback=_make_handler(cmd_key),
+                )
+                group_ref.add_command(cmd)
+
+            # Measure and trim from the tail
+            def _measure_group() -> int:
+                try:
+                    return len(_json.dumps(skill_group.to_dict()))
+                except Exception:
+                    return 99999
+
+            while _measure_group() > _BUDGET and _all_entries:
+                # Remove the last entry (least-important: deepest category)
+                removed = _all_entries.pop()
+                _grp, _name, _desc, _key, _cat = removed
+                _grp.remove_command(_name)
+                hidden += 1
 
             tree.add_command(skill_group)
 
             total = sum(len(v) for v in categories.values()) + len(uncategorized)
+            _registered = total - hidden
+            _final_bytes = _measure_group()
             logger.info(
-                "[%s] Registered /skill group: %d skill(s) across %d categories"
-                " + %d uncategorized",
-                self.name, total, len(categories), len(uncategorized),
+                "[%s] Registered /skill group: %d/%d skill(s), %d bytes (budget %d, %d hidden)",
+                self.name, _registered, total, _final_bytes, _BUDGET, hidden,
             )
             if hidden:
                 logger.warning(
