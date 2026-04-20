@@ -1624,3 +1624,12 @@ registry.register(
     check_fn=_check_ast_grep_reqs,
     emoji="🔧",
 )
+
+
+# ---------------------------------------------------------------------------
+# LSP-based tools — code_definition & code_references (cross-file resolution)
+# ---------------------------------------------------------------------------
+
+from tools.lsp_bridge import register_lsp_tools
+
+register_lsp_tools()

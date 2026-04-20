@@ -57,7 +57,7 @@ _HERMES_CORE_TOOLS = [
     # Cronjob management
     "cronjob",
     # Code intelligence — AST-aware symbol extraction, search, and refactoring
-    "code_symbols", "code_search", "code_refactor",
+    "code_symbols", "code_search", "code_refactor", "code_definition", "code_references",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -153,8 +153,8 @@ TOOLSETS = {
     },
 
     "code_intel": {
-        "description": "AST-aware code intelligence: symbol extraction, structural search, and safe refactoring (tree-sitter + ast-grep)",
-        "tools": ["code_symbols", "code_search", "code_refactor"],
+        "description": "AST-aware code intelligence: symbol extraction, structural search, safe refactoring, LSP go-to-definition and find-all-references (tree-sitter + ast-grep + LSP)",
+        "tools": ["code_symbols", "code_search", "code_refactor", "code_definition", "code_references"],
         "includes": []
     },
     
@@ -264,7 +264,7 @@ TOOLSETS = {
             "session_search",
             "execute_code", "delegate_task",
             # Code intelligence — AST-aware symbol extraction, search, and refactoring
-            "code_symbols", "code_search", "code_refactor",
+            "code_symbols", "code_search", "code_refactor", "code_definition", "code_references",
         ],
         "includes": []
     },
@@ -298,7 +298,7 @@ TOOLSETS = {
             # Cronjob management
             "cronjob",
             # Code intelligence — AST-aware symbol extraction, search, and refactoring
-            "code_symbols", "code_search", "code_refactor",
+            "code_symbols", "code_search", "code_refactor", "code_definition", "code_references",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 
