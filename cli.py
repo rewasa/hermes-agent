@@ -2728,6 +2728,16 @@ class HermesCLI:
             mcp_names = set((CLI_CONFIG.get("mcp_servers") or {}).keys())
             invalid = [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
             if invalid:
+                # Plugins haven't been discovered yet at this point — try
+                # loading them and re-validate before warning. Mirrors the
+                # logic in hermes_cli/oneshot.py and tui_gateway/server.py.
+                try:
+                    from hermes_cli.plugins import discover_plugins
+                    discover_plugins()
+                    invalid = [t for t in invalid if not validate_toolset(t)]
+                except Exception:
+                    pass
+            if invalid:
                 self._console_print(f"[bold red]Warning: Unknown toolsets: {', '.join(invalid)}[/]")
         
         # Filesystem checkpoints: CLI flag > config

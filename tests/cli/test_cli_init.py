@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-def _make_cli(env_overrides=None, config_overrides=None, **kwargs):
+def _make_cli(env_overrides=None, config_overrides=None, module_overrides=None, **kwargs):
     """Create a HermesCLI instance with minimal mocking."""
     import importlib
 
@@ -50,7 +50,7 @@ def _make_cli(env_overrides=None, config_overrides=None, **kwargs):
         import cli as _cli_mod
         _cli_mod = importlib.reload(_cli_mod)
         with patch.object(_cli_mod, "get_tool_definitions", return_value=[]), \
-             patch.dict(_cli_mod.__dict__, {"CLI_CONFIG": _clean_config}):
+             patch.dict(_cli_mod.__dict__, {"CLI_CONFIG": _clean_config, **(module_overrides or {})}):
             return _cli_mod.HermesCLI(**kwargs)
 
 
@@ -89,6 +89,37 @@ class TestMaxTurnsResolution:
         """The value passed to AIAgent must never be None (causes TypeError in run_conversation)."""
         cli = _make_cli()
         assert isinstance(cli.max_turns, int) and cli.max_turns == 90
+
+
+class TestToolsetValidation:
+    def test_plugin_toolsets_are_discovered_before_warning(self):
+        """Plugin-contributed toolsets should not emit false unknown-toolset warnings."""
+        discover_plugins = MagicMock()
+
+        def validate_toolset(name):
+            return discover_plugins.called and name == "plugin_toolset"
+
+        with patch("hermes_cli.plugins.discover_plugins", discover_plugins):
+            cli = _make_cli(
+                module_overrides={"validate_toolset": validate_toolset},
+                toolsets=["plugin_toolset"],
+            )
+
+        discover_plugins.assert_called_once_with()
+        assert cli.enabled_toolsets == ["plugin_toolset"]
+
+    def test_genuinely_unknown_toolsets_still_warn_after_discovery(self, capsys):
+        discover_plugins = MagicMock()
+        with patch("hermes_cli.plugins.discover_plugins", discover_plugins):
+            cli = _make_cli(
+                module_overrides={"validate_toolset": lambda _name: False},
+                toolsets=["missing_toolset"],
+            )
+
+        discover_plugins.assert_called_once_with()
+        assert cli.enabled_toolsets == ["missing_toolset"]
+        output = capsys.readouterr().out
+        assert "Warning: Unknown toolsets: missing_toolset" in output
 
 
 class TestVerboseAndToolProgress:
