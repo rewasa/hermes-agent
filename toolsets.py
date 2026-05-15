@@ -54,6 +54,8 @@ _HERMES_CORE_TOOLS = [
     "clarify",
     # Code execution + delegation
     "execute_code", "delegate_task",
+    # Code intelligence — AST-aware symbol extraction, search, refactoring, LSP defs/refs
+    "code_symbols", "code_search", "code_refactor", "code_definition", "code_references",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -86,6 +88,12 @@ TOOLSETS = {
     "search": {
         "description": "Web search only (no content extraction/scraping)",
         "tools": ["web_search"],
+        "includes": []
+    },
+
+    "code_intel": {
+        "description": "AST-aware code intelligence: symbol extraction, structural search, safe refactoring, LSP go-to-definition and find-all-references (tree-sitter + ast-grep + LSP)",
+        "tools": ["code_symbols", "code_search", "code_refactor", "code_definition", "code_references"],
         "includes": []
     },
     
